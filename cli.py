@@ -13,8 +13,8 @@ config = Dynaconf(
     validators=[Validator("apple_caldav_url", default="https://caldav.icloud.com")]
 )
 config.validators.validate()
-logging.config.dictConfig(config.logging)
-
+if hasattr(config, "logging") and config.logging:
+    logging.config.dictConfig(config.logging)
 
 app = typer.Typer()
 
