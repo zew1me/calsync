@@ -5,14 +5,14 @@ from settings_utils import (
 )
 from apple_calendar import AppleCalendar
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from dateutil import parser
 from zoneinfo import ZoneInfo
-
-# Fix: import Calendar from icalendar for transform_event
+from google_calendar import GoogleCalendar
+from apple_calendar import AppleCalendar
 
 class CalendarSync:
-    def __init__(self, apple_calendar, google_calendar, config):
+    def __init__(self, apple_calendar: AppleCalendar, google_calendar: GoogleCalendar, config):
         self.apple_calendar = apple_calendar
         self.google_calendar = google_calendar
         self.config = config
@@ -32,65 +32,143 @@ class CalendarSync:
         if isinstance(dt, str):
             return parser.isoparse(dt).astimezone(ZoneInfo("UTC"))
         raise ValueError(f"Unsupported date format: {dt!r}")
+    
+    @staticmethod
+    def to_rfc(dt) -> str | None: 
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            dt = dt.astimezone(ZoneInfo("UTC"))
+            return dt.isoformat()
+        return None    
+    
+    @staticmethod
+    def transform_event(apple_event) -> dict:
+        vobj = apple_event.vobject_instance
+        vevent = getattr(vobj, 'vevent', None)
+        if vevent is None:
+            raise ValueError("No VEVENT found in vobject instance")
 
-    def sync(self):
-        logging.debug("Starting sync process.")
-        # --- Google: Initial and incremental sync using syncToken ---
+        def get_text(field):
+            return str(getattr(vevent, field).value) if hasattr(vevent, field) else ""
+
+        summary    = get_text('summary')
+        description = get_text('description')
+        location   = get_text('location')
+        uid        = get_text('uid')
+        seq        = int(getattr(vevent, 'sequence').value) if hasattr(vevent, 'sequence') else 0
+
+        dtstart = getattr(vevent, 'dtstart').value if hasattr(vevent, 'dtstart') else None
+        dtend   = getattr(vevent, 'dtend').value if hasattr(vevent, 'dtend') else None
+
+        is_all_day = False
+        if hasattr(vevent, 'dtstart') and getattr(vevent.dtstart, 'params', None):
+            is_all_day = vevent.dtstart.params.get('VALUE') == 'DATE'
+
+        def to_rfc3339(dt):
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                return dt.astimezone(ZoneInfo("UTC")).isoformat()
+            return None
+
+        if is_all_day:
+            start_date = dtstart.date() if isinstance(dtstart, datetime) else dtstart
+            if start_date is not None:
+                google_start = {"date": start_date.isoformat()}
+            else:
+                raise ValueError("start_date is None and cannot be converted to ISO format")
+
+            if dtend:
+                end_date = dtend.date() if isinstance(dtend, datetime) else dtend
+            else:
+                end_date = start_date
+            if end_date is not None:
+                google_end = {"date": (end_date + timedelta(days=1)).isoformat()}
+            else:
+                raise ValueError("end_date is None and cannot be incremented by timedelta")
+        else:
+            start_iso = to_rfc3339(dtstart)
+            if start_iso is None:
+                raise ValueError("start time is missing or invalid for timed event")
+            if dtend:
+                end_iso = to_rfc3339(dtend)
+            else:
+                end_iso = (datetime.fromisoformat(start_iso) + timedelta(hours=1)).isoformat()
+            google_start = {"dateTime": start_iso, "timeZone": "UTC"}
+            google_end   = {"dateTime": end_iso,   "timeZone": "UTC"}
+
+        event = {
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "start": google_start,
+            "end": google_end,
+            "iCalUID": uid,
+            "sequence": seq,
+        }
+
+        if hasattr(vevent, 'rrule'):
+            r = vevent.rrule.value if hasattr(vevent.rrule, 'value') else vevent.rrule
+            event["recurrence"] = ["RRULE:" + str(r)] if isinstance(r, (str,)) else ["RRULE:" + rr for rr in r]
+
+        return event
+
+    def google_sync(self):
+        """Handles only Google sync and returns (google_events, new_g_sync_token)."""
         g_sync_token = get_g_sync_token("sync_state.toml")
-        gcal_id = self.config['google_calendar_id']
-        service = self.google_calendar.service
         google_events = []
         new_g_sync_token = None
         try:
             if not g_sync_token:
                 logging.debug("No Google sync token found, performing initial full sync.")
-                request_kwargs = dict(calendarId=gcal_id, singleEvents=True, maxResults=2500, showDeleted=True)
-                g_events = service.events().list(**request_kwargs).execute()
-                google_events.extend(g_events.get('items', []))
-                logging.debug(f"Fetched {len(g_events.get('items', []))} Google events (initial full sync).")
-                new_g_sync_token = g_events.get('nextSyncToken')
-                if not new_g_sync_token:
-                    logging.warning("No nextSyncToken returned after initial full sync.")
+                next_page_token = None
+                while True:
+                    g_events = self.google_calendar.list_events(page_token=next_page_token)
+                    google_events.extend(g_events.get('items', []))
+                    next_page_token = g_events.get('nextPageToken')
+                    if not next_page_token:
+                        new_g_sync_token = g_events.get('nextSyncToken')
+                        if not new_g_sync_token:
+                            logging.error("No nextSyncToken returned after initial full sync.")
+                        break
             else:
                 logging.debug(f"Using Google sync token: {g_sync_token}")
-                next_sync_token = g_sync_token
-                while next_sync_token:
+                g_events = self.google_calendar.list_events(sync_token=g_sync_token)
+                next_page_token = None
+                first = True
+                while True:
                     try:
-                        g_events = service.events().list(calendarId=gcal_id, syncToken=next_sync_token, showDeleted=True).execute()
-                        google_events.extend(g_events.get('items', []))
-                        logging.debug(f"Fetched {len(g_events.get('items', []))} Google events (incremental).")
-                        new_g_sync_token = g_events.get('nextSyncToken')
-                        next_page_token = g_events.get('nextPageToken')
-                        if next_page_token:
-                            # There are more pages, continue with nextPageToken
-                            logging.debug(f"Fetching next page of Google events with nextPageToken: {next_page_token}")
-                            # Note: nextPageToken is used with the same syncToken
-                            g_events = service.events().list(calendarId=gcal_id, syncToken=next_sync_token, showDeleted=True, pageToken=next_page_token).execute()
-                            google_events.extend(g_events.get('items', []))
-                            logging.debug(f"Fetched {len(g_events.get('items', []))} Google events (next page).")
-                            new_g_sync_token = g_events.get('nextSyncToken')
-                        if new_g_sync_token:
-                            next_sync_token = None  # End loop
+                        if first:
+                            first = False
                         else:
-                            next_sync_token = None  # End loop if no new sync token
-                    except Exception as e:
-                        # If token expired (410), do full sync
-                        logging.error(f"Error during Google incremental sync: {e}")
-                        if hasattr(e, 'resp') and getattr(e.resp, 'status', None) == 410:
-                            logging.warning("Google sync token expired, performing initial sync with timeMin.")
-                            now = datetime.now(timezone.utc).isoformat()
-                            g_events = service.events().list(calendarId=gcal_id, singleEvents=True, maxResults=2500, timeMin=now, showDeleted=True).execute()
-                            google_events.extend(g_events.get('items', []))
+                            g_events = self.google_calendar.list_events(page_token=next_page_token)
+                        google_events.extend(g_events.get('items', []))
+                        logging.debug(f"Fetched {len(g_events.get('items', []))} Google events (incremental page).")
+                        next_page_token = g_events.get('nextPageToken')
+                        if not next_page_token:
                             new_g_sync_token = g_events.get('nextSyncToken')
                             if not new_g_sync_token:
-                                logging.warning("No nextSyncToken returned after token reset.")
-                            next_sync_token = None
+                                logging.error("No nextSyncToken returned after incremental sync.")
+                            break
+                    except Exception as e:
+                        logging.error(f"Error during Google incremental sync: {e}")
+                        if hasattr(e, 'resp') and getattr(e.resp, 'status', None) == 410:
+                            logging.warning("Google sync token expired, re-starting initial sync")
+                            set_g_sync_token(None)
+                            # Only re-run Google sync, not the whole sync
+                            return self.google_sync()
                         else:
                             raise
         except Exception as e:
             logging.error(f"Error during Google sync: {e}")
             raise
+        return google_events, new_g_sync_token
 
+    def sync(self):
+        logging.debug("Starting sync process.")
+        # --- Google: Initial and incremental sync using syncToken ---
+        google_events, new_g_sync_token = self.google_sync()
         logging.debug(f"Total Google events fetched: {len(google_events)}")
 
         # --- Apple: CalDAV incremental sync using sync-token, with batching ---
@@ -118,7 +196,7 @@ class CalendarSync:
                 break
             apple_token = new_apple_token
 
-        # Persist final sync token
+        # Persist sync token
         if apple_token:
             set_apple_sync_token(apple_token, "sync_state.toml")
             logging.debug(f"Saved Apple sync token: {apple_token}")
@@ -143,12 +221,9 @@ class CalendarSync:
             g_event_body = self.transform_event(apple_event)
             if guid in guid_map:
                 logging.debug(f"Updating Google event {guid_map[guid]} for GUID {guid}")
-                if hasattr(google_calendar, 'update_event'):
-                    google_calendar.update_event(guid_map[guid], g_event_body)
-                else:
-                    google_calendar.service.events().update(calendarId=google_calendar.calendar_id, eventId=guid_map[guid], body=g_event_body).execute()
+                google_calendar.update_event(guid_map[guid], g_event_body)
             else:
-                created = google_calendar.insert_event(google_calendar.calendar_id, g_event_body, guid)
+                created = google_calendar.insert_event(g_event_body, guid)
                 guid_map[guid] = created['id']
                 logging.debug(f"Inserted Google event {created['id']} for new GUID {guid}")
 
@@ -160,77 +235,4 @@ class CalendarSync:
                 guid = guid.value
                 if guid in guid_map:
                     logging.debug(f"Deleting Google event {guid_map[guid]} for removed GUID {guid}")
-                    if hasattr(google_calendar, 'delete_event'):
-                        google_calendar.delete_event(guid_map[guid])
-                    else:
-                        google_calendar.service.events().delete(calendarId=google_calendar.calendar_id, eventId=guid_map[guid]).execute()
-                    del guid_map[guid]
-
-
-def transform_event(self, apple_event):
-    """
-    Convert a python-caldav CalendarObjectResource into a Google Calendar event dict using only vobject.
-    Supports all-day, timed, timezones, description, location, recurrence.
-    """
-    vobj = apple_event.vobject_instance
-    vevent = getattr(vobj, 'vevent', None)
-    if vevent is None:
-        raise ValueError("No VEVENT found in vobject instance")
-
-    def get_text(field):
-        return str(getattr(vevent, field).value) if hasattr(vevent, field) else ""
-
-    summary = get_text('summary')
-    description = get_text('description')
-    location = get_text('location')
-    uid = get_text('uid')
-    seq = int(getattr(vevent, 'sequence').value) if hasattr(vevent, 'sequence') else 0
-
-    dtstart = getattr(vevent, 'dtstart').value if hasattr(vevent, 'dtstart') else None
-    dtend = getattr(vevent, 'dtend').value if hasattr(vevent, 'dtend') else None
-
-    # Determine if all-day event
-    is_all_day = False
-    if hasattr(vevent, 'dtstart') and hasattr(vevent.dtstart, 'params'):
-        is_all_day = vevent.dtstart.params.get('VALUE') == 'DATE'
-
-    def to_utc(dt):
-        if isinstance(dt, datetime):
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-            return dt.astimezone(ZoneInfo("UTC"))
-        return dt
-
-    if is_all_day:
-        start_date = dtstart if not isinstance(dtstart, datetime) else dtstart.date()
-        if dtend:
-            end_date = dtend if not isinstance(dtend, datetime) else dtend.date()
-        else:
-            end_date = start_date
-        google_start = {"date": start_date.isoformat()}
-        google_end = {"date": (end_date + timedelta(days=1)).isoformat()}
-    else:
-        start_utc = to_utc(dtstart)
-        end_utc = to_utc(dtend) if dtend else (start_utc + timedelta(hours=1))
-        google_start = {"dateTime": start_utc.isoformat(), "timeZone": "UTC"}
-        google_end = {"dateTime": end_utc.isoformat(), "timeZone": "UTC"}
-
-    event = {
-        "summary": summary,
-        "description": description,
-        "location": location,
-        "start": google_start,
-        "end": google_end,
-        "iCalUID": uid,
-        "sequence": seq,
-    }
-
-    # Optional: handle recurrence
-    if hasattr(vevent, 'rrule'):
-        rrule_val = vevent.rrule.value if hasattr(vevent.rrule, 'value') else vevent.rrule
-        if isinstance(rrule_val, list):
-            event["recurrence"] = ["RRULE:" + r for r in rrule_val]
-        else:
-            event["recurrence"] = ["RRULE:" + str(rrule_val)]
-
-    return event
+                    google_calendar.delete_event(guid_map[guid])
