@@ -8,8 +8,10 @@ def update_settings_file(new_settings, filename="settings.toml"):
         settings = toml.load(filename)
     except FileNotFoundError:
         settings = {}
-    # Update with new settings
     settings.update(new_settings)
+    for k in list(settings.keys()):
+        if isinstance(settings[k], dict) and not settings[k]:
+            del settings[k]
     # Write back to file
     with open(filename, "w") as f:
         toml.dump(settings, f)
