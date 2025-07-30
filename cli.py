@@ -1,12 +1,19 @@
 
 import typer
 from settings_utils import update_settings_file
-from dynaconf import Dynaconf
+from dynaconf import Dynaconf, Validator
+import logging.config
 from google_calendar import GoogleCalendar
 from apple_calendar import AppleCalendar
 from sync import CalendarSync
 
-config = Dynaconf(settings_files=['settings.toml'])
+config = Dynaconf(
+    settings_files=['settings.toml'],
+    validators=[Validator("apple_caldav_url", default="https://caldav.icloud.com")]
+)
+config.validators.validate()
+logging.config.dictConfig(config.logging)
+
 
 app = typer.Typer()
 
@@ -35,6 +42,8 @@ def configure():
 @app.command()
 def sync():
     """Sync Apple Calendar to Google Calendar."""
+    typer.echo("Starting calendar sync...")
+
     google_calendar = GoogleCalendar(config.google_credentials)
     apple_calendar = AppleCalendar(
         config.apple_email,
