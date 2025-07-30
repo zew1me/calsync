@@ -1,6 +1,6 @@
 
 import typer
-from settings_utils import update_settings_file, set_last_sync
+from settings_utils import update_settings_file
 from dynaconf import Dynaconf
 from google_calendar import GoogleCalendar
 from apple_calendar import AppleCalendar
@@ -44,8 +44,6 @@ def sync():
     )
     sync = CalendarSync(apple_calendar, google_calendar, config)
     sync.sync()
-    # After successful sync, update last_sync timestamp
-    set_last_sync()
-
+    
 if __name__ == "__main__":
     app()

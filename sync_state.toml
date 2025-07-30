@@ -1,0 +1,4 @@
+# State file for sync tokens and other sync state
+
+g_sync_token = ""
+apple_sync_token = ""

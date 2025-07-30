@@ -1,5 +1,4 @@
 from settings_utils import (
-    set_last_sync, get_last_sync,
     get_g_sync_token, set_g_sync_token,
     get_apple_sync_token, set_apple_sync_token,
     load_guid_map, save_guid_map
@@ -36,7 +35,7 @@ class CalendarSync:
     def sync(self):
         logging.debug("Starting sync process.")
         # --- Google: Incremental sync using syncToken ---
-        g_sync_token = get_g_sync_token()
+        g_sync_token = get_g_sync_token("sync_state.toml")
         gcal_id = self.config['google_calendar_id']
         service = self.google_calendar.service
         google_events = []
@@ -51,7 +50,7 @@ class CalendarSync:
             logging.debug(f"Fetched {len(google_events)} Google events.")
             new_g_sync_token = g_events.get('nextSyncToken')
             if new_g_sync_token:
-                set_g_sync_token(new_g_sync_token)
+                set_g_sync_token(new_g_sync_token, "sync_state.toml")
                 logging.debug(f"Updated Google sync token: {new_g_sync_token}")
         except Exception as e:
             # If token expired (410), do full sync
@@ -60,7 +59,7 @@ class CalendarSync:
                 logging.warning("Google sync token expired, performing full sync.")
                 g_events = service.events().list(calendarId=gcal_id, singleEvents=True, maxResults=2500, timeMin='1970-01-01T00:00:00Z').execute()
                 google_events = g_events.get('items', [])
-                set_g_sync_token(g_events.get('nextSyncToken'))
+                set_g_sync_token(g_events.get('nextSyncToken'), "sync_state.toml")
                 logging.debug(f"Reset Google sync token: {g_events.get('nextSyncToken')}")
             else:
                 raise
@@ -74,7 +73,7 @@ class CalendarSync:
                 added, changed, removed, new_token = apple_cal.changes(sync_token=apple_sync_token)
             else:
                 added, changed, removed, new_token = apple_cal.changes(sync_token=None)
-            set_apple_sync_token(new_token)
+            set_apple_sync_token(new_token, "sync_state.toml")
             logging.debug(f"Apple changes: added={len(added)}, changed={len(changed)}, removed={len(removed)}, new_token={new_token}")
         except Exception as e:
             # If token invalid, do full sync
@@ -82,7 +81,7 @@ class CalendarSync:
             if 'invalid-sync-token' in str(e):
                 logging.warning("Apple sync token invalid, performing full sync.")
                 added, changed, removed, new_token = apple_cal.changes(sync_token=None)
-                set_apple_sync_token(new_token)
+                set_apple_sync_token(new_token, "sync_state.toml")
                 logging.debug(f"Apple changes after full sync: added={len(added)}, changed={len(changed)}, removed={len(removed)}, new_token={new_token}")
             else:
                 raise
@@ -116,37 +115,73 @@ class CalendarSync:
         save_guid_map(guid_map)
         logging.debug("Sync process complete.")
 
-    def transform_event(self, apple_event):
-        # Example transformation: must be implemented to map CalDAV event to Google event
-        # Handle all-day, timed, and timezone-aware events
-        vevent = apple_event.vobject_instance.vevent
-        summary = str(vevent.summary.value) if hasattr(vevent, 'summary') else ""
-        start = vevent.dtstart.value
-        end = vevent.dtend.value if hasattr(vevent, 'dtend') else None
-        if isinstance(start, datetime):
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=ZoneInfo("UTC"))
-            start = start.astimezone(ZoneInfo("UTC"))
-        if end and isinstance(end, datetime):
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=ZoneInfo("UTC"))
-            end = end.astimezone(ZoneInfo("UTC"))
-        # All-day event
-        if hasattr(vevent.dtstart, 'params') and vevent.dtstart.params.get('VALUE') == ['DATE']:
-            # Google expects end date to be exclusive for all-day events
-            dt_start = start if isinstance(start, datetime) else datetime.strptime(str(start), "%Y-%m-%d")
-            if end:
-                dt_end = end if isinstance(end, datetime) else datetime.strptime(str(end), "%Y-%m-%d")
-            else:
-                dt_end = dt_start
-            return {
-                "summary": summary,
-                "start": {"date": dt_start.date().isoformat()},
-                "end": {"date": (dt_end.date() + timedelta(days=1)).isoformat()},
-            }
-        # Timed event
-        return {
-            "summary": summary,
-            "start": {"dateTime": start.isoformat(), "timeZone": "UTC"},
-            "end": {"dateTime": end.isoformat(), "timeZone": "UTC"} if end else None,
-        }
+
+def transform_event(self, apple_event):
+    """
+    Convert a python-caldav CalendarObjectResource into a Google Calendar event dict.
+    Supports all-day, timed, timezones, description, location, recurrence.
+    """
+    # parse raw iCalendar text
+    raw = apple_event.data
+    cal = Calendar.from_ical(raw)
+    ve = next(comp for comp in cal.walk() if comp.name == "VEVENT")
+
+    summary = str(ve.get("SUMMARY", ""))
+    description = str(ve.get("DESCRIPTION", ""))
+    location = str(ve.get("LOCATION", ""))
+
+    uid = str(ve.get("UID"))
+    seq = int(ve.get("SEQUENCE", 0))
+
+    dtstart = ve.get("DTSTART").dt
+    dtend = ve.get("DTEND").dt if ve.get("DTEND") else None
+
+    is_all_day = hasattr(ve["DTSTART"], 'params') and ve["DTSTART"].params.get('VALUE') == 'DATE'
+
+    def to_utc(dt):
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            return dt.astimezone(ZoneInfo("UTC"))
+        return dt
+
+    if is_all_day:
+        # convert to date
+        start_date = dtstart if not isinstance(dtstart, datetime) else dtstart.date()
+        if dtend:
+            end_date = dtend if not isinstance(dtend, datetime) else dtend.date()
+        else:
+            end_date = start_date
+        # end exclusive
+        google_start = {"date": start_date.isoformat()}
+        google_end = {"date": (end_date + timedelta(days=1)).isoformat()}
+    else:
+        start_utc = to_utc(dtstart)
+        end_utc = to_utc(dtend) if dtend else (start_utc + timedelta(hours=1))
+        google_start = {"dateTime": start_utc.isoformat(), "timeZone": "UTC"}
+        google_end = {"dateTime": end_utc.isoformat(), "timeZone": "UTC"}
+
+    event = {
+        "summary": summary,
+        "description": description,
+        "location": location,
+        "start": google_start,
+        "end": google_end,
+        "iCalUID": uid,
+        "sequence": seq,
+    }
+
+    # Optional: handle recurrence
+    if ve.get("RRULE"):
+        event["recurrence"] = [ve.get("RRULE").to_ical().decode()]
+
+    # Optional: attendees
+    if ve.get("ATTENDEE"):
+        atts = ve.get("ATTENDEE")
+        attendees = []
+        for att in ([atts] if not isinstance(atts, list) else atts):
+            email = att.to_ical().decode().split(':')[-1]
+            attendees.append({"email": email})
+        event["attendees"] = attendees
+
+    return event
