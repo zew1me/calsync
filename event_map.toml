@@ -1,0 +1,6 @@
+# Maps Apple GUIDs to Google Event IDs
+# Format: { apple_guid = google_event_id }
+
+[guid_map]
+# Example:
+# 1234567890abcdef = "google_event_id_1"

@@ -5,11 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "caldav>=2.0.1",
     "dynaconf>=3.2.11",
     "google-api-python-client>=2.176.0",
     "google-auth>=2.40.3",
     "google-auth-oauthlib>=1.2.2",
-    "pyicloud>=2.0.1",
     "python-dateutil>=2.9.0.post0",
     "toml>=0.10.2",
     "typer>=0.16.0",
