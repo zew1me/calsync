@@ -13,6 +13,7 @@ dependencies = [
     "python-dateutil>=2.9.0.post0",
     "toml>=0.10.2",
     "typer>=0.16.0",
+    "tzlocal>=5.3.1",
 ]
 
 [dependency-groups]

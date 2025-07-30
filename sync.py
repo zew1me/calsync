@@ -22,14 +22,18 @@ class CalendarSync:
 
     @staticmethod
     def apple_date_to_dt(dt):
+        import tzlocal
         if isinstance(dt, datetime):
             return dt
+        if isinstance(dt, (int, float)):
+            # Treat as Unix timestamp (seconds since epoch)
+            local_tz = tzlocal.get_localzone()
+            return datetime.fromtimestamp(dt, tz=local_tz)
         if isinstance(dt, str):
             return parser.isoparse(dt)
         if isinstance(dt, list):
-            # Use all elements in order: year, month, day, hour, minute, second
-            logging.info("Converting Apple date %r to datetime", dt)
-            return datetime(dt[1], dt[2], dt[3], dt[4], dt[5], dt[6])
+                # Apple date format: [YYYYMMDD, year, month, day, hour, minute, second_or_ms]
+                return datetime(dt[1], dt[2], dt[3], dt[4], dt[5], int(dt[6] / 1000))
         raise ValueError(f"Unsupported date format: {dt!r}")
 
     def sync(self):
@@ -43,8 +47,9 @@ class CalendarSync:
                 continue
             try:
                 ev_dt = self.apple_date_to_dt(ev['startDate'])
-            except ValueError:
+            except ValueError as e:
                 logging.warning("Skipping event %r – bad date %r", ev.get('title'), ev['startDate'])
+                logging.debug("Error details: %s", e)
                 continue
 
             # Make aware in UTC
@@ -55,7 +60,7 @@ class CalendarSync:
 
         for event in apple_events:
             google_event = self.transform_event(event)
-            self.google_calendar.insert_event(self.config['google_calendar_id'], google_event)
+            self.google_calendar.insert_event(self.config['google_calendar_id'], google_event, event.get('guid') or None)
 
         set_last_sync()
         logging.info("Sync completed.")
@@ -76,7 +81,6 @@ class CalendarSync:
         else:
             dt_start = dt_start.replace(tzinfo=timezone.utc).astimezone(self.local_tzinfo)
             dt_end   = dt_end.replace(tzinfo=timezone.utc).astimezone(self.local_tzinfo)
-
             return {
                 "summary": apple_event.get('title', '').strip(),
                 "start": {
@@ -87,4 +91,5 @@ class CalendarSync:
                     "dateTime": dt_end.isoformat(),
                     "timeZone": self.local_tzname
                 },
+                "description": f"This was copied from an Apple calendar event.\nEvent GUID: {apple_event.get('guid', 'N/A')}"
             }

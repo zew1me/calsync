@@ -36,7 +36,18 @@ class GoogleCalendar:
         logging.info(f"Fetched {len(calendars['items'])} Google Calendars.")
         return calendars['items']
 
-    def insert_event(self, calendar_id, event):
+    def insert_event(self, calendar_id, event, apple_guid):
+        # Insert the event
         created_event = self.service.events().insert(calendarId=calendar_id, body=event).execute()
         logging.info(f"Event created: {created_event['id']}")
+
+        # If a GUID is provided, find and delete duplicate events with the same GUID
+        if apple_guid:
+            events = self.service.events().list(calendarId=calendar_id, q=apple_guid).execute()
+            for existing_event in events.get('items', []):
+                # Skip the event that was just created
+                if existing_event['id'] != created_event['id']:
+                    self.service.events().delete(calendarId=calendar_id, eventId=existing_event['id']).execute()
+                    logging.info(f"Deleted duplicate event: {existing_event['id']}")
+
         return created_event

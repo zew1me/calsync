@@ -37,6 +37,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "toml" },
     { name = "typer" },
+    { name = "tzlocal" },
 ]
 
 [package.dev-dependencies]
@@ -56,6 +57,7 @@ requires-dist = [
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "toml", specifier = ">=0.10.2" },
     { name = "typer", specifier = ">=0.16.0" },
+    { name = "tzlocal", specifier = ">=5.3.1" },
 ]
 
 [package.metadata.requires-dev]
