@@ -54,8 +54,8 @@ def configure():
 
     # Google
     google_credentials = typer.prompt(f"Enter path to Google credentials JSON [{existing.get('google_credentials','')}]", default=existing.get('google_credentials',''))
-    google_calendar = GoogleCalendar(google_credentials)
-    google_calendars = google_calendar.list_calendars()
+    google_calendars = GoogleCalendar.list_calendars(google_credentials)
+    
     typer.echo("Select a Google Calendar:")
     for idx, cal in enumerate(google_calendars):
         typer.echo(f"{idx}: {cal['summary']}")
@@ -85,7 +85,7 @@ def sync():
     """Sync Apple Calendar to Google Calendar."""
     typer.echo("Starting calendar sync...")
 
-    google_calendar = GoogleCalendar(config.google_credentials)
+    google_calendar = GoogleCalendar(config.google_credentials, config.google_calendar_id)
     apple_calendar = AppleCalendar(
         config.apple_email,
         config.apple_password,
